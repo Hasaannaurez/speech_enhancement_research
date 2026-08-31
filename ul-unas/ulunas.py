@@ -450,7 +450,7 @@ class Decoder(nn.Module):
             in_channels = out_channels
 
         module = block_types[types[0]]
-        de_convs.append(module(in_channels, 1, final_width, kernels[0], strides[0], groups[0], use_deconv=True, is_last=True))
+        de_convs.append(module(in_channels, 2, final_width, kernels[0], strides[0], groups[0], use_deconv=True, is_last=True))
         
         self.de_convs = nn.ModuleList(de_convs)
 
@@ -459,7 +459,7 @@ class Decoder(nn.Module):
         for i in range(n_blocks):
             x = self.de_convs[i](x + en_outs[n_blocks-i-1])
             # print(i, x.shape)
-        x = torch.sigmoid(x)
+        x = torch.tanh(x)
         return x
 
 
@@ -476,7 +476,8 @@ class ULUNAS(nn.Module):
         groups=[1, 2, 2, 2, 2],
         channels=[12, 24, 24, 32, 16],
         kernels=[(3, 3), (2, 3), (2, 3), (1, 5), (1, 5)],
-        widths=[65, 33, 33, 33, 33]
+        widths=[65, 33, 33, 33, 33],
+        num_mics=4
         
     ):
         super().__init__()
@@ -484,7 +485,9 @@ class ULUNAS(nn.Module):
         self.hop_len = hop_len
         self.win_len = win_len
         
-        self.erb = ERB(erb_low, erb_high, nfft=n_fft, high_lim=8000, fs=16000)
+        # self.erb = ERB(erb_low, erb_high, nfft=n_fft, high_lim=8000, fs=16000)
+        self.front_end = nn.Conv2d(in_channels=2 * num_mics, out_channels=1, kernel_size=(1, 3), stride=(1, 2), padding=(0, 1))
+        self.back_end = nn.ConvTranspose2d(in_channels=2, out_channels=2, kernel_size=(1, 3), stride=(1, 2), padding=(0, 1), output_padding=(0, 0))
 
         self.encoder = Encoder(types, channels, widths, kernels, strides, groups)
         
@@ -497,22 +500,29 @@ class ULUNAS(nn.Module):
 
     def forward(self, input):
         """
-        input: (batch, n_samples)
+        input: (batch, num_mics, n_samples)
         """
         device = input.device
-        assert input.ndim == 2  # mono input
-        n_samples = input.shape[1]
+        assert input.ndim == 3  # multi-channel input
+        n_samples = input.shape[2]
         
         stft_kwargs = {'n_fft': self.n_fft, 'hop_length': self.hop_len, 'win_length': self.win_len,
                        'window': torch.hann_window(self.win_len).to(device), 'onesided': True}
         
-        spec = torch.stft(input,  **stft_kwargs, return_complex=True)
-        spec = torch.view_as_real(spec)  # (B,F,T,2)
-
-        spec = spec.permute(0,3,2,1)  # (B,2,T,F)
-        feat = torch.log10(torch.norm(spec, dim=1, keepdim=True).clamp(1e-12))
-
-        feat = self.erb.bm(feat)  # (B,4,T,129)
+        B, C, T_samples = input.shape
+        input_reshaped = input.reshape(B*C, T_samples)
+        
+        spec = torch.stft(input_reshaped,  **stft_kwargs, return_complex=True)
+        _, F, T_frames = spec.shape
+        spec = spec.reshape(B, C, F, T_frames)
+        
+        # FT-JNF style: stack raw real and imaginary parts along channel dimension
+        feat = torch.cat([spec.real, spec.imag], dim=1)  # (B, 2*C, F, T_frames)
+        feat = feat.permute(0, 1, 3, 2)  # (B, 2*C, T_frames, F)
+        
+        # Front-end: fuse mics and compress frequency 257 -> 129
+        feat = self.front_end(feat)  # (B, 1, T_frames, 129)
+        # feat = self.erb.bm(feat)
         
         feat, en_outs = self.encoder(feat)
 
@@ -520,12 +530,17 @@ class ULUNAS(nn.Module):
 
         m_feat = self.decoder(feat, en_outs)
         
-        m = self.erb.bs(m_feat)
+        # Back-end: upsample frequency 129 -> 257
+        m = self.back_end(m_feat)  # (B, 2, T_frames, 257)
+        # m = self.erb.bs(m_feat)
 
-        spec_enh = spec * m
-        spec_enh = spec_enh.permute(0,3,2,1)  # (B,F,T,2)
+        # Complex Masking on Reference Mic (mic 0)
+        ref_spec = spec[:, 0, :, :]  # (B, F, T_frames) complex
+        m = m.permute(0, 3, 2, 1)  # (B, F, T_frames, 2)
+        complex_m = torch.complex(m[..., 0], m[..., 1])  # (B, F, T_frames) complex
         
-        spec_enh = torch.complex(spec_enh[...,0], spec_enh[...,1])
+        spec_enh = complex_m * ref_spec  # (B, F, T_frames) complex
+        
         output = torch.istft(spec_enh, **stft_kwargs)
         output = torch.nn.functional.pad(output, (0, n_samples-output.shape[1]))
         
@@ -533,24 +548,24 @@ class ULUNAS(nn.Module):
 
 
 if __name__ == "__main__":
-    model = ULUNAS().eval()
+    model = ULUNAS(num_mics=4).eval()
 
     """complexity count"""
     from ptflops import get_model_complexity_info
-    macs, params = get_model_complexity_info(model, (16000,), as_strings=False,
-                                            print_per_layer_stat=False, verbose=False)
-    params = 0
-    for p in model.parameters():
-        params += p.numel()
-    print(f"The complexity of ULUNAS: MACs={macs/1e6:.2f} M, Params={params/1e3:.2f} k\n")
-
+    macs, params = get_model_complexity_info(model, (4, 16000,), as_strings=False,
+                                             print_per_layer_stat=True, verbose=True)
+    print('{:<30}  {:<8}'.format('Computational complexity: ', macs / 1e9))
+    print('{:<30}  {:<8}'.format('Number of parameters: ', params / 1e6))
 
     """causality check"""
-    a = torch.randn(1, 16000)
-    b = torch.randn(1, 16000)
-    c = torch.randn(1, 16000)
-    x1 = torch.cat([a, b], dim=1)
-    x2 = torch.cat([a, c], dim=1)
+    a = torch.randn(1, 4, 16000)
+    b = torch.randn(1, 4, 16000)
+    c = torch.cat([a, b], dim=2)
+
+    with torch.no_grad():
+        out1 = model(a)
+        out2 = model(c)
+    print(torch.norm(out1 - out2[:, :16000]), dim=1)
 
     y1 = model(x1)[0]
     y2 = model(x2)[0]
