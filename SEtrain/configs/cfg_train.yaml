@@ -2,6 +2,7 @@ network_config:
   n_fft: 512
   hop_len: 256
   win_len: 512
+  num_mics: 3
 
 DDP:
   world_size: 2
@@ -24,20 +25,18 @@ FFT:
   win_length: 512
 
 loss:
-  n_fft: ${FFT.n_fft}
-  hop_len: ${FFT.hop_length}
-  win_len: ${FFT.win_length}
-  compress_factor: 0.3
   eps: 1e-12
-  lamda_ri: 30
-  lamda_mag: 70
 
 train_dataset: 
-  length_in_seconds: 10
-  num_data_tot: 72000  # 200 h
-  num_data_per_epoch: 10000
-  random_start_point: False
-  train: True
+  stage: 'train'
+  prep_files: {
+    data: '/path/to/prep_mix.hdf5',
+    meta: '/path/to/prep_mix_meta.json'
+  }
+  n_channels: 3
+  meta_frame_length: 48000
+  dry_target: False
+  disable_random: False
 
 train_dataloader: 
   batch_size: 8
@@ -46,9 +45,15 @@ train_dataloader:
   pin_memory: True
 
 validation_dataset: 
-  length_in_seconds: 10
-  random_start_point: False
-  train: False
+  stage: 'val'
+  prep_files: {
+    data: '/path/to/prep_mix.hdf5',
+    meta: '/path/to/prep_mix_meta.json'
+  }
+  n_channels: 3
+  meta_frame_length: 48000
+  dry_target: False
+  disable_random: True
 
 validation_dataloader:
   batch_size: 4
