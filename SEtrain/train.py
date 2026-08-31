@@ -16,9 +16,12 @@ import torch.distributed as dist
 from torch.utils.tensorboard import SummaryWriter
 from distributed_utils import reduce_value
 
-from models.gtcrn_end2end import GTCRN as Model
-from loss_factory import HybridLoss as Loss
-from dataloader_dns3 import DNS3Dataset as Dataset
+import sys
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '../ul-unas'))
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '../src/data'))
+from ulunas import ULUNAS as Model
+from loss_factory import SSNRLoss as Loss
+from dataset import MixDataset as Dataset
 from scheduler import LinearWarmupCosineAnnealingLR as WarmupLR
 
 seed = 43
@@ -183,9 +186,9 @@ class Trainer:
             self.train_dataloader.dataset.sample_data_per_epoch()
         self.train_bar = tqdm(self.train_dataloader, ncols=110)
 
-        for step, (noisy, clean) in enumerate(self.train_bar, 1):
-            noisy = noisy.to(self.device)
-            clean = clean.to(self.device)  
+        for step, batch in enumerate(self.train_bar, 1):
+            noisy = batch['noisy_td'].to(self.device)
+            clean = batch['clean_td'][:, 0, :].to(self.device)  
             
             enhanced = self.model(noisy)
                 
@@ -221,9 +224,9 @@ class Trainer:
         total_pesq_score = 0
 
         self.validation_bar = tqdm(self.validation_dataloader, ncols=123)
-        for step, (noisy, clean) in enumerate(self.validation_bar, 1):
-            noisy = noisy.to(self.device)
-            clean = clean.to(self.device)  
+        for step, batch in enumerate(self.validation_bar, 1):
+            noisy = batch['noisy_td'].to(self.device)
+            clean = batch['clean_td'][:, 0, :].to(self.device)  
             
             enhanced = self.model(noisy)
 
@@ -247,7 +250,7 @@ class Trainer:
                 enhanced_path = os.path.join(self.sample_path, 'sample_{}_enh_epoch{}.wav'.format(step, str(epoch).zfill(3)))
                 if not os.path.exists(noisy_path):
                     noisy = noisy.cpu().numpy()
-                    sf.write(noisy_path, noisy[0], samplerate=self.config['samplerate'])
+                    sf.write(noisy_path, noisy[0].T, samplerate=self.config['samplerate'])
                     sf.write(clean_path, clean[0], samplerate=self.config['samplerate'])
 
                 sf.write(enhanced_path, enhanced[0], samplerate=self.config['samplerate'])
