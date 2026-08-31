@@ -101,6 +101,31 @@ class MultiResolutionSTFTLoss(nn.Module):
         return loss
     
 
+class SSNRLoss(nn.Module):
+    """
+    Scale-Sensitive Signal-to-Noise Ratio (SNR) Loss.
+    This loss penalizes scale differences between the prediction and true signal.
+    """
+    def __init__(self, eps=1e-12):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, y_pred, y_true):
+        assert y_pred.shape == y_true.shape
+        
+        # S_target is strictly s_true (alpha = 1)
+        y_norm = y_true
+        
+        # Standard SNR formula (using original scale factor of 20 for standard norm)
+        ssnr = - 20 * torch.log10(
+            torch.norm(y_norm, dim=-1, keepdim=True) / 
+            torch.norm(y_pred - y_norm, dim=-1, keepdim=True).clamp(self.eps) + 
+            self.eps
+        ).mean()
+        
+        return ssnr
+
+
 
 if __name__=='__main__':
     a = torch.randn(2, 10000)
